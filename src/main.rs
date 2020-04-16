@@ -11,17 +11,13 @@ use std::thread;
 type DiscoveryResponse = (String, Vec<u8>);
 
 fn start_scanner_thread(
-    ip: ipnetwork::IpNetwork,
+    ip: net::IpAddr,
     sender: sync::mpsc::Sender<DiscoveryResponse>,
 ) -> std::io::Result<thread::JoinHandle<()>> {
     let socket: net::UdpSocket = match ip {
-        ipnetwork::IpNetwork::V4(ipv4_network) => {
-            net::UdpSocket::bind(net::SocketAddrV4::new(ipv4_network.ip(), 0))?
-        }
+        net::IpAddr::V4(addr) => net::UdpSocket::bind(net::SocketAddrV4::new(addr, 0))?,
 
-        ipnetwork::IpNetwork::V6(ipv6_network) => {
-            net::UdpSocket::bind(net::SocketAddrV6::new(ipv6_network.ip(), 0, 0, 0))?
-        }
+        net::IpAddr::V6(addr) => net::UdpSocket::bind(net::SocketAddrV6::new(addr, 0, 0, 0))?,
     };
 
     let receiver = socket.try_clone().unwrap();
@@ -124,7 +120,8 @@ fn main() {
     let mut success = Vec::new();
     let mut failure = Vec::new();
     for interface in interfaces {
-        for ip in interface.ips {
+        for ip_network in interface.ips {
+            let ip = ip_network.ip();
             match start_scanner_thread(ip, sender.clone()) {
                 Ok(handle) => {
                     scanner_thread_handles.push(handle);
