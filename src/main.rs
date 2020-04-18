@@ -258,8 +258,13 @@ fn main() {
     }
 
     println!("\nlistening for mDNS/SSDP replies...");
+    let mut log_set = collections::HashSet::<String>::new();
     for log_msg in receiver.into_iter() {
+        if log_set.contains(&log_msg) {
+            continue;
+        }
         println!("{}", log_msg);
+        log_set.insert(log_msg);
     }
 
     for handle in scanner_thread_handles {
