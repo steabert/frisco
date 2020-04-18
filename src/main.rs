@@ -207,54 +207,26 @@ fn main() {
     let (sender, receiver) = sync::mpsc::channel::<String>();
 
     let mut scanner_thread_handles = Vec::<thread::JoinHandle<()>>::new();
-    let mut success = Vec::new();
-    let mut failure = Vec::new();
     for interface in interfaces {
+        println!("scanning on interface {}:", interface.name);
         for ip_network in interface.ips {
             let ip = ip_network.ip();
+            println!("@ {}", ip);
             match scan_mdns(ip, sender.clone()) {
                 Ok(handle) => {
                     scanner_thread_handles.push(handle);
-                    success.push(format!(
-                        "started mDNS scan on {} @ {}",
-                        interface.name,
-                        ip.to_string()
-                    ))
+                    println!("  mDNS [OK]")
                 }
-                Err(msg) => failure.push(format!(
-                    "  failed mDNS scan on {} @ {} ({})",
-                    interface.name,
-                    ip.to_string(),
-                    msg
-                )),
+                Err(msg) => println!("  mDNS [FAILED] ({})", msg),
             };
             match scan_ssdp(ip, sender.clone()) {
                 Ok(handle) => {
                     scanner_thread_handles.push(handle);
-                    success.push(format!(
-                        "  started SSDP scan on {} @ {}",
-                        interface.name,
-                        ip.to_string()
-                    ))
+                    println!("  SSDP [OK]")
                 }
-                Err(msg) => failure.push(format!(
-                    "  failed SSDP scan on {} @ {} ({})",
-                    interface.name,
-                    ip.to_string(),
-                    msg
-                )),
+                Err(msg) => println!("  SSDP [FAILED] ({})", msg),
             };
         }
-    }
-
-    println!("Started scanning on:");
-    for msg in success {
-        println!("{}", msg);
-    }
-
-    println!("Failed to start scanning on:");
-    for msg in failure {
-        println!("{}", msg);
     }
 
     println!("\nlistening for mDNS/SSDP replies...");
