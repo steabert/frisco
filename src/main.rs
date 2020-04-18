@@ -17,6 +17,7 @@ use std::thread;
 /// Setup a socket and send a question to the mDNS multicast address
 /// requesting a unicast reply. The replies are gathered in a separate
 /// thread and sent to a logging channel.
+
 fn scan_mdns(
     ip: IpAddr,
     channel: sync::mpsc::Sender<String>,
@@ -54,23 +55,16 @@ fn scan_mdns(
         loop {
             match receiver.recv_from(&mut buffer) {
                 Ok((n_bytes, origin)) => {
-                    let ip = origin.ip();
+                    let src_ip = origin.ip();
                     let data = &buffer[0..n_bytes];
-                    if let Ok(packet) = dns_parser::Packet::parse(data) {
-                        for answer in packet.answers {
-                            if let dns_parser::rdata::RData::PTR(
-                                dns_parser::rdata::Ptr(name),
-                            ) = answer.data
-                            {
-                                let log_msg =
-                                    format!("{} {}", ip, name.to_string());
-                                if channel.send(log_msg).is_err() {
-                                    println!("upstream error, abort scan");
-                                    return;
-                                }
-                            }
+                    if let Some(name) = parse_mdns_response(data) {
+                        let log_msg =
+                            format!("{} {}", src_ip, name.to_string());
+                        if channel.send(log_msg).is_err() {
+                            println!("upstream error, abort scan");
+                            return;
                         }
-                    };
+                    }
                 }
                 Err(msg) => println!("noooo! {}", msg),
             }; // blocking
@@ -80,6 +74,14 @@ fn scan_mdns(
     //
     // send mDNS question
     //
+    let packet_data = build_mdns_packet();
+    sender.send_to(&packet_data, &mdns_socket_addr)?;
+
+    // We're done!
+    Ok(handle)
+}
+
+fn build_mdns_packet() -> Vec<u8> {
     let mut builder = dns_parser::Builder::new_query(0, false);
     builder.add_question(
         "_googlecast._tcp.local",
@@ -87,11 +89,20 @@ fn scan_mdns(
         dns_parser::QueryType::PTR,
         dns_parser::QueryClass::IN,
     );
-    let packet_data = builder.build().unwrap();
-    sender.send_to(&packet_data, &mdns_socket_addr)?;
+    return builder.build().unwrap();
+}
 
-    // We're done!
-    Ok(handle)
+fn parse_mdns_response(data: &[u8]) -> Option<String> {
+    if let Ok(packet) = dns_parser::Packet::parse(data) {
+        for answer in packet.answers.first() {
+            if let dns_parser::rdata::RData::PTR(dns_parser::rdata::Ptr(name)) =
+                answer.data
+            {
+                return Some(name.to_string());
+            }
+        }
+    };
+    return None;
 }
 
 ///
