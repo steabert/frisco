@@ -4,6 +4,7 @@ extern crate ipnetwork;
 extern crate pnet;
 
 use std::collections;
+use std::io;
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6,
     UdpSocket,
@@ -19,63 +20,88 @@ use std::thread;
 /// thread and sent to a logging channel.
 
 fn scan_mdns(
-    ip: IpAddr,
+    local_ips: &[IpAddr],
     channel: sync::mpsc::Sender<String>,
 ) -> std::io::Result<thread::JoinHandle<()>> {
     //
     // Setup source/destination socket addresses
     //
-    let (socket_addr, mdns_socket_addr) = match ip {
-        IpAddr::V4(addr) => (
-            SocketAddr::V4(SocketAddrV4::new(addr, 0)),
-            SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::new(224, 0, 0, 251),
-                5353,
-            )),
-        ),
-        IpAddr::V6(addr) => (
-            SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)),
-            SocketAddr::V6(SocketAddrV6::new(
-                Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb),
-                5353,
-                0,
-                0,
-            )),
-        ),
-    };
+    let mdns_v4_socket_addr =
+        SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353);
+    let mdns_v6_socket_addr = SocketAddrV6::new(
+        Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb),
+        5353,
+        0,
+        0,
+    );
 
-    let sender = UdpSocket::bind(socket_addr)?;
-    let receiver = sender.try_clone().unwrap();
+    let local_socket_addrs = local_ips.iter().map(|ip| match ip.clone() {
+        IpAddr::V4(addr) => SocketAddr::V4(SocketAddrV4::new(addr, 0)),
+        IpAddr::V6(addr) => SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)),
+    });
 
-    //
+    let senders: Vec<UdpSocket> = local_socket_addrs
+        .filter_map(|addr| match UdpSocket::bind(addr) {
+            Ok(socket) => Some(socket),
+            Err(msg) => {
+                eprintln!("skipped mDNS @ {} ({})", addr, msg);
+                None
+            }
+        })
+        .collect();
+
+    let receivers: Vec<UdpSocket> = senders
+        .iter()
+        .map(|sender| {
+            let receiver: UdpSocket = sender.try_clone().unwrap();
+            receiver.set_nonblocking(true).unwrap();
+            receiver
+        })
+        .collect();
+
     // start to listen for mDNS responses
-    //
+
     let handle = thread::spawn(move || {
         let mut buffer = [0; 4096];
         loop {
-            match receiver.recv_from(&mut buffer) {
-                Ok((n_bytes, origin)) => {
-                    let src_ip = origin.ip();
-                    let data = &buffer[0..n_bytes];
-                    if let Some(name) = parse_mdns_response(data) {
-                        let log_msg =
-                            format!("{} {}", src_ip, name.to_string());
-                        if channel.send(log_msg).is_err() {
-                            println!("upstream error, abort scan");
-                            return;
+            for receiver in &receivers {
+                match receiver.recv_from(&mut buffer) {
+                    Ok((n_bytes, origin)) => {
+                        let src_ip = origin.ip();
+                        let data = &buffer[0..n_bytes];
+                        if let Some(name) = parse_mdns_response(data) {
+                            let log_msg =
+                                format!("{} {}", src_ip, name.to_string());
+                            if channel.send(log_msg).is_err() {
+                                println!("upstream error, abort scan");
+                                return;
+                            }
                         }
                     }
-                }
-                Err(msg) => println!("noooo! {}", msg),
-            }; // blocking
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(msg) => {
+                        println!("noooo! {}", msg);
+                    }
+                };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(97));
         }
     });
 
     //
     // send mDNS question
     //
-    let packet_data = build_mdns_packet();
-    sender.send_to(&packet_data, &mdns_socket_addr)?;
+    let packet = build_mdns_packet();
+
+    for sender in senders {
+        let mdns_socket_addr = match sender.local_addr().unwrap().ip() {
+            IpAddr::V4(_) => SocketAddr::V4(mdns_v4_socket_addr),
+            IpAddr::V6(_) => SocketAddr::V6(mdns_v6_socket_addr),
+        };
+        sender.send_to(&packet, &mdns_socket_addr)?;
+    }
 
     // We're done!
     Ok(handle)
@@ -112,33 +138,44 @@ fn parse_mdns_response(data: &[u8]) -> Option<String> {
 /// requesting a unicast reply. The replies are gathered in a separate
 /// thread and sent to a logging channel.
 fn scan_ssdp(
-    ip: IpAddr,
+    local_ips: &[IpAddr],
     channel: sync::mpsc::Sender<String>,
 ) -> std::io::Result<thread::JoinHandle<()>> {
     //
     // Setup source/destination socket addresses
     //
-    let (socket_addr, ssdp_socket_addr) = match ip {
-        IpAddr::V4(addr) => (
-            SocketAddr::V4(SocketAddrV4::new(addr, 0)),
-            SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::new(239, 255, 255, 250),
-                1900,
-            )),
-        ),
-        IpAddr::V6(addr) => (
-            SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)),
-            SocketAddr::V6(SocketAddrV6::new(
-                Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xc),
-                1900,
-                0,
-                0,
-            )),
-        ),
-    };
+    let mdns_v4_socket_addr =
+        SocketAddrV4::new(Ipv4Addr::new(239, 255, 255, 250), 1900);
+    let mdns_v6_socket_addr = SocketAddrV6::new(
+        Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xc),
+        1900,
+        0,
+        0,
+    );
 
-    let sender = UdpSocket::bind(socket_addr)?;
-    let receiver = sender.try_clone().unwrap();
+    let local_socket_addrs = local_ips.iter().map(|ip| match ip.clone() {
+        IpAddr::V4(addr) => SocketAddr::V4(SocketAddrV4::new(addr, 0)),
+        IpAddr::V6(addr) => SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)),
+    });
+
+    let senders: Vec<UdpSocket> = local_socket_addrs
+        .filter_map(|addr| match UdpSocket::bind(addr) {
+            Ok(socket) => Some(socket),
+            Err(msg) => {
+                eprintln!("skipped SSDP @ {} ({})", addr, msg);
+                None
+            }
+        })
+        .collect();
+
+    let receivers: Vec<UdpSocket> = senders
+        .iter()
+        .map(|sender| {
+            let receiver: UdpSocket = sender.try_clone().unwrap();
+            receiver.set_nonblocking(true).unwrap();
+            receiver
+        })
+        .collect();
 
     //
     // start to listen for mDNS responses
@@ -146,20 +183,28 @@ fn scan_ssdp(
     let handle = thread::spawn(move || {
         let mut buffer = [0; 4096];
         loop {
-            match receiver.recv_from(&mut buffer) {
-                Ok((n_bytes, origin)) => {
-                    let ip = origin.ip();
-                    let data = &buffer[0..n_bytes];
-                    if let Some(name) = parse_ssdp_response(data) {
-                        let log_msg = format!("{} {}", ip, name);
-                        if channel.send(log_msg).is_err() {
-                            println!("upstream error, abort scan");
-                            return;
+            for receiver in &receivers {
+                match receiver.recv_from(&mut buffer) {
+                    Ok((n_bytes, origin)) => {
+                        let ip = origin.ip();
+                        let data = &buffer[0..n_bytes];
+                        if let Some(name) = parse_ssdp_response(data) {
+                            let log_msg = format!("{} {}", ip, name);
+                            if channel.send(log_msg).is_err() {
+                                println!("upstream error, abort scan");
+                                return;
+                            }
                         }
                     }
-                }
-                Err(msg) => println!("noooo! {}", msg),
-            }; // blocking
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(msg) => {
+                        println!("noooo! {}", msg);
+                    }
+                };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(103));
         }
     });
 
@@ -167,7 +212,14 @@ fn scan_ssdp(
     // send SSDP M-SEARCH
     //
     let packet = build_ssdp_packet();
-    sender.send_to(&packet, ssdp_socket_addr)?;
+
+    for sender in senders {
+        let mdns_socket_addr = match sender.local_addr().unwrap().ip() {
+            IpAddr::V4(_) => SocketAddr::V4(mdns_v4_socket_addr),
+            IpAddr::V6(_) => SocketAddr::V6(mdns_v6_socket_addr),
+        };
+        sender.send_to(&packet, &mdns_socket_addr)?;
+    }
 
     // We're done!
     Ok(handle)
@@ -206,30 +258,27 @@ fn main() {
 
     let (sender, receiver) = sync::mpsc::channel::<String>();
 
-    let mut scanner_thread_handles = Vec::<thread::JoinHandle<()>>::new();
-    for interface in interfaces {
-        println!("scanning on interface {}:", interface.name);
-        for ip_network in interface.ips {
-            let ip = ip_network.ip();
-            println!("@ {}", ip);
-            match scan_mdns(ip, sender.clone()) {
-                Ok(handle) => {
-                    scanner_thread_handles.push(handle);
-                    println!("  mDNS [OK]")
-                }
-                Err(msg) => println!("  mDNS [FAILED] ({})", msg),
-            };
-            match scan_ssdp(ip, sender.clone()) {
-                Ok(handle) => {
-                    scanner_thread_handles.push(handle);
-                    println!("  SSDP [OK]")
-                }
-                Err(msg) => println!("  SSDP [FAILED] ({})", msg),
-            };
-        }
-    }
+    let if_addresses: Vec<IpAddr> = interfaces
+        .iter()
+        .map(|interface| interface.ips.iter())
+        .flat_map(|ips| ips.map(|ip| ip.ip()))
+        .collect();
 
-    println!("\nlistening for mDNS/SSDP replies...");
+    let mut scanner_thread_handles = Vec::<thread::JoinHandle<()>>::new();
+    match scan_mdns(&if_addresses, sender.clone()) {
+        Ok(handle) => {
+            scanner_thread_handles.push(handle);
+        }
+        Err(msg) => eprintln!("mDNS scan failed to start: {}", msg),
+    };
+    match scan_ssdp(&if_addresses, sender.clone()) {
+        Ok(handle) => {
+            scanner_thread_handles.push(handle);
+        }
+        Err(msg) => eprintln!("SSDP scan failed to start: {}", msg),
+    };
+
+    println!("scanning...");
     let mut log_set = collections::HashSet::<String>::new();
     for log_msg in receiver.into_iter() {
         if log_set.contains(&log_msg) {
