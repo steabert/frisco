@@ -4,48 +4,79 @@ extern crate ipnetwork;
 extern crate pnet;
 
 use std::collections;
-use std::net;
+use std::net::{
+    IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6,
+    UdpSocket,
+};
 use std::sync;
 use std::thread;
 
-type DiscoveryResponse = (String, Vec<u8>);
-
-fn start_scanner_thread(
-    ip: net::IpAddr,
-    sender: sync::mpsc::Sender<DiscoveryResponse>,
+///
+/// start an mDNS scanner thread
+///
+/// Setup a socket and send a question to the mDNS multicast address
+/// requesting a unicast reply. The replies are gathered in a separate
+/// thread and sent to a logging channel.
+fn scan_mdns(
+    ip: IpAddr,
+    channel: sync::mpsc::Sender<String>,
 ) -> std::io::Result<thread::JoinHandle<()>> {
-    let socket: net::UdpSocket = match ip {
-        net::IpAddr::V4(addr) => net::UdpSocket::bind(net::SocketAddrV4::new(addr, 0))?,
-
-        net::IpAddr::V6(addr) => net::UdpSocket::bind(net::SocketAddrV6::new(addr, 0, 0, 0))?,
+    //
+    // Setup source/destination socket addresses
+    //
+    let (socket_addr, mdns_socket_addr) = match ip {
+        IpAddr::V4(addr) => (
+            SocketAddr::V4(SocketAddrV4::new(addr, 0)),
+            SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::new(224, 0, 0, 251),
+                5353,
+            )),
+        ),
+        IpAddr::V6(addr) => (
+            SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)),
+            SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb),
+                5353,
+                0,
+                0,
+            )),
+        ),
     };
 
-    let receiver = socket.try_clone().unwrap();
+    let sender = UdpSocket::bind(socket_addr)?;
+    let receiver = sender.try_clone().unwrap();
+
+    //
+    // start to listen for mDNS responses
+    //
     let handle = thread::spawn(move || {
         let mut buffer = [0; 4096];
         loop {
             match receiver.recv_from(&mut buffer) {
                 Ok((n_bytes, origin)) => {
-                    if sender
-                        .send((origin.ip().to_string(), (&buffer[0..n_bytes]).to_vec()))
-                        .is_err()
-                    {
-                        println!("upstream error, abort scan");
-                        return;
-                    }
+                    let ip = origin.ip();
+                    let data = &buffer[0..n_bytes];
+                    if let Ok(packet) = dns_parser::Packet::parse(data) {
+                        for answer in packet.answers {
+                            if let dns_parser::rdata::RData::PTR(
+                                dns_parser::rdata::Ptr(name),
+                            ) = answer.data
+                            {
+                                let log_msg =
+                                    format!("{} {}", ip, name.to_string());
+                                if channel.send(log_msg).is_err() {
+                                    println!("upstream error, abort scan");
+                                    return;
+                                }
+                            }
+                        }
+                    };
                 }
                 Err(msg) => println!("noooo! {}", msg),
             }; // blocking
         }
     });
 
-    send_discovery_packet(socket)?;
-
-    Ok(handle)
-}
-
-// Send mDNS question and SSDP M-SEARCH from a socket
-fn send_discovery_packet(socket: net::UdpSocket) -> std::io::Result<()> {
     //
     // send mDNS question
     //
@@ -57,64 +88,99 @@ fn send_discovery_packet(socket: net::UdpSocket) -> std::io::Result<()> {
         dns_parser::QueryClass::IN,
     );
     let packet_data = builder.build().unwrap();
+    sender.send_to(&packet_data, &mdns_socket_addr)?;
 
-    socket.send_to(&packet_data, "224.0.0.251:5353")?;
+    // We're done!
+    Ok(handle)
+}
+
+///
+/// start an SSDP scanner thread
+///
+/// Setup a socket and send a question to the mDNS multicast address
+/// requesting a unicast reply. The replies are gathered in a separate
+/// thread and sent to a logging channel.
+fn scan_ssdp(
+    ip: IpAddr,
+    channel: sync::mpsc::Sender<String>,
+) -> std::io::Result<thread::JoinHandle<()>> {
+    //
+    // Setup source/destination socket addresses
+    //
+    let (socket_addr, ssdp_socket_addr) = match ip {
+        IpAddr::V4(addr) => (
+            SocketAddr::V4(SocketAddrV4::new(addr, 0)),
+            SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::new(239, 255, 255, 250),
+                1900,
+            )),
+        ),
+        IpAddr::V6(addr) => (
+            SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)),
+            SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xc),
+                1900,
+                0,
+                0,
+            )),
+        ),
+    };
+
+    let sender = UdpSocket::bind(socket_addr)?;
+    let receiver = sender.try_clone().unwrap();
+
+    //
+    // start to listen for mDNS responses
+    //
+    let handle = thread::spawn(move || {
+        let mut buffer = [0; 4096];
+        loop {
+            match receiver.recv_from(&mut buffer) {
+                Ok((n_bytes, origin)) => {
+                    let ip = origin.ip();
+                    let data = &buffer[0..n_bytes];
+                    let mut headers = [httparse::EMPTY_HEADER; 32];
+                    let mut response = httparse::Response::new(&mut headers);
+                    if let Ok(_) = response.parse(data) {
+                        for header in response.headers {
+                            if header.name.to_ascii_lowercase() == "server" {
+                                let log_msg = format!(
+                                    "{} {}",
+                                    ip,
+                                    std::str::from_utf8(header.value).unwrap()
+                                );
+                                if channel.send(log_msg).is_err() {
+                                    println!("upstream error, abort scan");
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(msg) => println!("noooo! {}", msg),
+            }; // blocking
+        }
+    });
 
     //
     // send SSDP M-SEARCH
     //
-    let m_search =
-        "M-SEARCH * HTTP/1.1\rHost:239.255.255.250:1900\rMan:\"ssdp:discover\"\rST: ssdp:all\rMX: 1\r\n\r\n";
+    let m_search = "\
+        M-SEARCH * HTTP/1.1\r\
+        Host:239.255.255.250:1900\r\
+        Man:\"ssdp:discover\"\r\
+        ST: ssdp:all\rMX: 1\r\n\r\n";
+    sender.send_to(m_search.as_bytes(), ssdp_socket_addr)?;
 
-    socket.send_to(m_search.as_bytes(), "239.255.255.250:1900")?;
-
-    // Everything fine
-    Ok(())
-}
-
-fn parse_discovery_responses(receiver: sync::mpsc::Receiver<DiscoveryResponse>) {
-    // Store discovered addresses so we can skip them.
-    let mut address_store = collections::HashSet::<String>::new();
-
-    for (ip, data) in receiver.into_iter() {
-        // Ignore already discovered IPs.
-        if address_store.contains(&ip) {
-            continue;
-        }
-
-        if &data[0..4] == "HTTP".as_bytes() {
-            // Assume it's an SSDP response.
-            let mut headers = [httparse::EMPTY_HEADER; 32];
-            let mut response = httparse::Response::new(&mut headers);
-            if let Ok(_) = response.parse(&data) {
-                for header in response.headers {
-                    if header.name.to_ascii_lowercase() == "server" {
-                        println!("{} {}", ip, std::str::from_utf8(header.value).unwrap());
-                    }
-                }
-            }
-        } else {
-            // Assume it's a mDNS response.
-            if let Ok(packet) = dns_parser::Packet::parse(&data) {
-                for answer in packet.answers {
-                    if let dns_parser::rdata::RData::PTR(dns_parser::rdata::Ptr(name)) = answer.data
-                    {
-                        println!("{} {}", ip, name.to_string());
-                    }
-                }
-            };
-        }
-
-        // Remember so we can skip it next time.
-        address_store.insert(ip);
-    }
+    // We're done!
+    Ok(handle)
 }
 
 /// Print list of IP, name of discovered mDNS/SSDP services.
 fn main() {
     let interfaces = pnet::datalink::interfaces();
 
-    let (sender, receiver) = sync::mpsc::channel::<DiscoveryResponse>();
+    let (sender, receiver) = sync::mpsc::channel::<String>();
 
     let mut scanner_thread_handles = Vec::<thread::JoinHandle<()>>::new();
     let mut success = Vec::new();
@@ -122,13 +188,33 @@ fn main() {
     for interface in interfaces {
         for ip_network in interface.ips {
             let ip = ip_network.ip();
-            match start_scanner_thread(ip, sender.clone()) {
+            match scan_mdns(ip, sender.clone()) {
                 Ok(handle) => {
                     scanner_thread_handles.push(handle);
-                    success.push(format!("  {} @ {}", interface.name, ip.to_string()))
+                    success.push(format!(
+                        "started mDNS scan on {} @ {}",
+                        interface.name,
+                        ip.to_string()
+                    ))
                 }
                 Err(msg) => failure.push(format!(
-                    "  {} @ {} ({})",
+                    "  failed mDNS scan on {} @ {} ({})",
+                    interface.name,
+                    ip.to_string(),
+                    msg
+                )),
+            };
+            match scan_ssdp(ip, sender.clone()) {
+                Ok(handle) => {
+                    scanner_thread_handles.push(handle);
+                    success.push(format!(
+                        "  started SSDP scan on {} @ {}",
+                        interface.name,
+                        ip.to_string()
+                    ))
+                }
+                Err(msg) => failure.push(format!(
+                    "  failed SSDP scan on {} @ {} ({})",
                     interface.name,
                     ip.to_string(),
                     msg
@@ -148,7 +234,9 @@ fn main() {
     }
 
     println!("\nlistening for mDNS/SSDP replies...");
-    parse_discovery_responses(receiver);
+    for log_msg in receiver.into_iter() {
+        println!("{}", log_msg);
+    }
 
     for handle in scanner_thread_handles {
         handle.join().unwrap();
