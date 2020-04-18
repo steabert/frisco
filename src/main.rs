@@ -150,21 +150,11 @@ fn scan_ssdp(
                 Ok((n_bytes, origin)) => {
                     let ip = origin.ip();
                     let data = &buffer[0..n_bytes];
-                    let mut headers = [httparse::EMPTY_HEADER; 32];
-                    let mut response = httparse::Response::new(&mut headers);
-                    if let Ok(_) = response.parse(data) {
-                        for header in response.headers {
-                            if header.name.to_ascii_lowercase() == "server" {
-                                let log_msg = format!(
-                                    "{} {}",
-                                    ip,
-                                    std::str::from_utf8(header.value).unwrap()
-                                );
-                                if channel.send(log_msg).is_err() {
-                                    println!("upstream error, abort scan");
-                                    return;
-                                }
-                            }
+                    if let Some(name) = parse_ssdp_response(data) {
+                        let log_msg = format!("{} {}", ip, name);
+                        if channel.send(log_msg).is_err() {
+                            println!("upstream error, abort scan");
+                            return;
                         }
                     }
                 }
@@ -176,18 +166,41 @@ fn scan_ssdp(
     //
     // send SSDP M-SEARCH
     //
-    let m_search = "\
-        M-SEARCH * HTTP/1.1\r\
-        Host:239.255.255.250:1900\r\
-        Man:\"ssdp:discover\"\r\
-        ST: ssdp:all\rMX: 1\r\n\r\n";
-    sender.send_to(m_search.as_bytes(), ssdp_socket_addr)?;
+    let packet = build_ssdp_packet();
+    sender.send_to(&packet, ssdp_socket_addr)?;
 
     // We're done!
     Ok(handle)
 }
 
-/// Print list of IP, name of discovered mDNS/SSDP services.
+fn build_ssdp_packet() -> Vec<u8> {
+    let m_search = "\
+        M-SEARCH * HTTP/1.1\r\
+        Host:239.255.255.250:1900\r\
+        Man:\"ssdp:discover\"\r\
+        ST: ssdp:all\rMX: 1\r\n\r\n";
+    return m_search.as_bytes().to_vec();
+}
+
+fn parse_ssdp_response(data: &[u8]) -> Option<String> {
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut response = httparse::Response::new(&mut headers);
+    if let Ok(_) = response.parse(data) {
+        for header in response.headers {
+            if header.name.to_ascii_lowercase() == "server" {
+                return Some(
+                    std::str::from_utf8(header.value).unwrap().to_string(),
+                );
+            }
+        }
+    }
+    return None;
+}
+
+///
+/// Loop over available interfaces and start a discovery scan
+/// on each of their addresses.
+///
 fn main() {
     let interfaces = pnet::datalink::interfaces();
 
