@@ -9,7 +9,8 @@ use std::net::{
     UdpSocket,
 };
 use std::sync;
-use std::thread;
+use std::thread::{sleep, spawn, JoinHandle};
+use std::time::Duration;
 
 ///
 /// start an mDNS scanner thread
@@ -20,7 +21,7 @@ use std::thread;
 fn scan_mdns(
     local_ips: &[(IpAddr, u32)],
     channel: sync::mpsc::Sender<String>,
-) -> std::io::Result<thread::JoinHandle<()>> {
+) -> std::io::Result<JoinHandle<()>> {
     //
     // Setup source/destination socket addresses
     //
@@ -62,7 +63,7 @@ fn scan_mdns(
 
     // start to listen for mDNS responses
 
-    let handle = thread::spawn(move || {
+    let handle = spawn(move || {
         let mut buffer = [0; 4096];
         loop {
             for receiver in &receivers {
@@ -80,14 +81,14 @@ fn scan_mdns(
                         }
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        sleep(Duration::from_millis(97));
                         continue;
                     }
                     Err(msg) => {
-                        println!("noooo! {}", msg);
+                        panic!("error while reading from UDP socket: {}", msg);
                     }
                 };
             }
-            std::thread::sleep(std::time::Duration::from_millis(97));
         }
     });
 
@@ -141,7 +142,7 @@ fn parse_mdns_response(data: &[u8]) -> Option<String> {
 fn scan_ssdp(
     local_ips: &[(IpAddr, u32)],
     channel: sync::mpsc::Sender<String>,
-) -> std::io::Result<thread::JoinHandle<()>> {
+) -> std::io::Result<JoinHandle<()>> {
     //
     // Setup source/destination socket addresses
     //
@@ -184,7 +185,7 @@ fn scan_ssdp(
     //
     // start to listen for mDNS responses
     //
-    let handle = thread::spawn(move || {
+    let handle = spawn(move || {
         let mut buffer = [0; 4096];
         loop {
             for receiver in &receivers {
@@ -201,14 +202,14 @@ fn scan_ssdp(
                         }
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        sleep(Duration::from_millis(103));
                         continue;
                     }
                     Err(msg) => {
-                        println!("noooo! {}", msg);
+                        panic!("error while reading from UDP socket: {}", msg);
                     }
                 };
             }
-            std::thread::sleep(std::time::Duration::from_millis(103));
         }
     });
 
@@ -272,7 +273,7 @@ fn main() {
         })
         .collect();
 
-    let mut scanner_thread_handles = Vec::<thread::JoinHandle<()>>::new();
+    let mut scanner_thread_handles = Vec::<JoinHandle<()>>::new();
     match scan_mdns(&if_addresses, sender.clone()) {
         Ok(handle) => {
             scanner_thread_handles.push(handle);
