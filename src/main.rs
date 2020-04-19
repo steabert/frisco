@@ -1,6 +1,5 @@
 extern crate dns_parser;
 extern crate httparse;
-extern crate ipnetwork;
 extern crate pnet;
 
 use std::collections;
@@ -18,9 +17,8 @@ use std::thread;
 /// Setup a socket and send a question to the mDNS multicast address
 /// requesting a unicast reply. The replies are gathered in a separate
 /// thread and sent to a logging channel.
-
 fn scan_mdns(
-    local_ips: &[IpAddr],
+    local_ips: &[(IpAddr, u32)],
     channel: sync::mpsc::Sender<String>,
 ) -> std::io::Result<thread::JoinHandle<()>> {
     //
@@ -35,10 +33,13 @@ fn scan_mdns(
         0,
     );
 
-    let local_socket_addrs = local_ips.iter().map(|ip| match ip.clone() {
-        IpAddr::V4(addr) => SocketAddr::V4(SocketAddrV4::new(addr, 0)),
-        IpAddr::V6(addr) => SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)),
-    });
+    let local_socket_addrs =
+        local_ips.iter().map(|(ip, scope_id)| match ip.clone() {
+            IpAddr::V4(addr) => SocketAddr::V4(SocketAddrV4::new(addr, 0)),
+            IpAddr::V6(addr) => {
+                SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, *scope_id))
+            }
+        });
 
     let senders: Vec<UdpSocket> = local_socket_addrs
         .filter_map(|addr| match UdpSocket::bind(addr) {
@@ -138,7 +139,7 @@ fn parse_mdns_response(data: &[u8]) -> Option<String> {
 /// requesting a unicast reply. The replies are gathered in a separate
 /// thread and sent to a logging channel.
 fn scan_ssdp(
-    local_ips: &[IpAddr],
+    local_ips: &[(IpAddr, u32)],
     channel: sync::mpsc::Sender<String>,
 ) -> std::io::Result<thread::JoinHandle<()>> {
     //
@@ -153,10 +154,13 @@ fn scan_ssdp(
         0,
     );
 
-    let local_socket_addrs = local_ips.iter().map(|ip| match ip.clone() {
-        IpAddr::V4(addr) => SocketAddr::V4(SocketAddrV4::new(addr, 0)),
-        IpAddr::V6(addr) => SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)),
-    });
+    let local_socket_addrs =
+        local_ips.iter().map(|(ip, scope_id)| match ip.clone() {
+            IpAddr::V4(addr) => SocketAddr::V4(SocketAddrV4::new(addr, 0)),
+            IpAddr::V6(addr) => {
+                SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, *scope_id))
+            }
+        });
 
     let senders: Vec<UdpSocket> = local_socket_addrs
         .filter_map(|addr| match UdpSocket::bind(addr) {
@@ -258,10 +262,14 @@ fn main() {
 
     let (sender, receiver) = sync::mpsc::channel::<String>();
 
-    let if_addresses: Vec<IpAddr> = interfaces
+    let if_addresses: Vec<(IpAddr, u32)> = interfaces
         .iter()
-        .map(|interface| interface.ips.iter())
-        .flat_map(|ips| ips.map(|ip| ip.ip()))
+        .flat_map(|interface| {
+            let pnet::datalink::NetworkInterface { index, ips, .. } = interface;
+            let addresses: Vec<(IpAddr, u32)> =
+                ips.iter().map(|ip| (ip.ip(), *index)).collect();
+            return addresses;
+        })
         .collect();
 
     let mut scanner_thread_handles = Vec::<thread::JoinHandle<()>>::new();
