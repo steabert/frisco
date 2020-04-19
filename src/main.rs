@@ -1,6 +1,5 @@
 extern crate dns_parser;
 extern crate httparse;
-extern crate pnet;
 
 use std::collections;
 use std::io;
@@ -12,6 +11,8 @@ use std::sync;
 use std::thread::{sleep, spawn, JoinHandle};
 use std::time::Duration;
 
+mod interfaces;
+
 ///
 /// start an mDNS scanner thread
 ///
@@ -19,7 +20,7 @@ use std::time::Duration;
 /// requesting a unicast reply. The replies are gathered in a separate
 /// thread and sent to a logging channel.
 fn scan_mdns(
-    local_ips: &[(IpAddr, u32)],
+    local_ips: &[interfaces::InetAddr],
     channel: sync::mpsc::Sender<String>,
 ) -> std::io::Result<JoinHandle<()>> {
     //
@@ -38,7 +39,7 @@ fn scan_mdns(
         local_ips.iter().map(|(ip, scope_id)| match ip.clone() {
             IpAddr::V4(addr) => SocketAddr::V4(SocketAddrV4::new(addr, 0)),
             IpAddr::V6(addr) => {
-                SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, *scope_id))
+                SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, scope_id.unwrap()))
             }
         });
 
@@ -140,7 +141,7 @@ fn parse_mdns_response(data: &[u8]) -> Option<String> {
 /// requesting a unicast reply. The replies are gathered in a separate
 /// thread and sent to a logging channel.
 fn scan_ssdp(
-    local_ips: &[(IpAddr, u32)],
+    local_ips: &[interfaces::InetAddr],
     channel: sync::mpsc::Sender<String>,
 ) -> std::io::Result<JoinHandle<()>> {
     //
@@ -159,7 +160,7 @@ fn scan_ssdp(
         local_ips.iter().map(|(ip, scope_id)| match ip.clone() {
             IpAddr::V4(addr) => SocketAddr::V4(SocketAddrV4::new(addr, 0)),
             IpAddr::V6(addr) => {
-                SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, *scope_id))
+                SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, scope_id.unwrap()))
             }
         });
 
@@ -259,28 +260,18 @@ fn parse_ssdp_response(data: &[u8]) -> Option<String> {
 /// on each of their addresses.
 ///
 fn main() {
-    let interfaces = pnet::datalink::interfaces();
-
+    let if_inet_addresses = interfaces::get_if_inet_addrs();
     let (sender, receiver) = sync::mpsc::channel::<String>();
 
-    let if_addresses: Vec<(IpAddr, u32)> = interfaces
-        .iter()
-        .flat_map(|interface| {
-            let pnet::datalink::NetworkInterface { index, ips, .. } = interface;
-            let addresses: Vec<(IpAddr, u32)> =
-                ips.iter().map(|ip| (ip.ip(), *index)).collect();
-            return addresses;
-        })
-        .collect();
-
     let mut scanner_thread_handles = Vec::<JoinHandle<()>>::new();
-    match scan_mdns(&if_addresses, sender.clone()) {
+
+    match scan_mdns(&if_inet_addresses, sender.clone()) {
         Ok(handle) => {
             scanner_thread_handles.push(handle);
         }
         Err(msg) => eprintln!("mDNS scan failed to start: {}", msg),
     };
-    match scan_ssdp(&if_addresses, sender.clone()) {
+    match scan_ssdp(&if_inet_addresses, sender.clone()) {
         Ok(handle) => {
             scanner_thread_handles.push(handle);
         }
