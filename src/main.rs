@@ -118,6 +118,7 @@ fn build_mdns_packet() -> Vec<u8> {
         dns_parser::QueryType::PTR,
         dns_parser::QueryClass::IN,
     );
+    println!("{:?}", builder);
     return builder.build().unwrap();
 }
 
@@ -147,10 +148,10 @@ fn scan_ssdp(
     //
     // Setup source/destination socket addresses
     //
-    let mdns_v4_socket_addr =
+    let ssdp_v4_socket_addr =
         SocketAddrV4::new(Ipv4Addr::new(239, 255, 255, 250), 1900);
-    let mdns_v6_socket_addr = SocketAddrV6::new(
-        Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xc),
+    let ssdp_v6_socket_addr = SocketAddrV6::new(
+        Ipv6Addr::new(0xff0e, 0, 0, 0, 0, 0, 0, 0xc),
         1900,
         0,
         0,
@@ -217,26 +218,31 @@ fn scan_ssdp(
     //
     // send SSDP M-SEARCH
     //
-    let packet = build_ssdp_packet();
 
     for sender in senders {
-        let mdns_socket_addr = match sender.local_addr().unwrap().ip() {
-            IpAddr::V4(_) => SocketAddr::V4(mdns_v4_socket_addr),
-            IpAddr::V6(_) => SocketAddr::V6(mdns_v6_socket_addr),
+        let ssdp_socket_addr = match sender.local_addr().unwrap().ip() {
+            IpAddr::V4(_) => SocketAddr::V4(ssdp_v4_socket_addr),
+            IpAddr::V6(_) => SocketAddr::V6(ssdp_v6_socket_addr),
         };
-        sender.send_to(&packet, &mdns_socket_addr)?;
+        let packet = build_ssdp_packet(&ssdp_socket_addr);
+        sender.send_to(&packet, &ssdp_socket_addr)?;
     }
 
     // We're done!
     Ok(handle)
 }
 
-fn build_ssdp_packet() -> Vec<u8> {
-    let m_search = "\
-        M-SEARCH * HTTP/1.1\r\
-        Host:239.255.255.250:1900\r\
-        Man:\"ssdp:discover\"\r\
-        ST: ssdp:all\rMX: 1\r\n\r\n";
+fn build_ssdp_packet(dst: &SocketAddr) -> Vec<u8> {
+    let m_search = format!(
+        "\
+    M-SEARCH * HTTP/1.1\r\n\
+    Host:{}\r\n\
+    Man:\"ssdp:discover\"\r\n\
+    ST: ssdp:all\r\n\
+    MX: 1\r\n\r\n",
+        dst.to_string()
+    );
+
     return m_search.as_bytes().to_vec();
 }
 
@@ -260,7 +266,8 @@ fn parse_ssdp_response(data: &[u8]) -> Option<String> {
 /// on each of their addresses.
 ///
 fn main() {
-    let if_inet_addresses = interfaces::get_if_inet_addrs();
+    let if_inet_addresses: Vec<interfaces::InetAddr> =
+        interfaces::ifaddrs().collect();
     let (sender, receiver) = sync::mpsc::channel::<String>();
 
     let mut scanner_thread_handles = Vec::<JoinHandle<()>>::new();
