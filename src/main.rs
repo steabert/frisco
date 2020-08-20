@@ -67,6 +67,7 @@ fn scan_mdns(
     let handle = spawn(move || {
         let mut buffer = [0; 4096];
         loop {
+            let mut blocked_receivers = 0;
             for receiver in &receivers {
                 match receiver.recv_from(&mut buffer) {
                     Ok((n_bytes, origin)) => {
@@ -82,13 +83,16 @@ fn scan_mdns(
                         }
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        sleep(Duration::from_millis(97));
+                        blocked_receivers += 1;
                         continue;
                     }
                     Err(msg) => {
                         panic!("error while reading from UDP socket: {}", msg);
                     }
                 };
+            }
+            if blocked_receivers == receivers.len() {
+                sleep(Duration::from_millis(97));
             }
         }
     });
@@ -190,6 +194,7 @@ fn scan_ssdp(
     let handle = spawn(move || {
         let mut buffer = [0; 4096];
         loop {
+            let mut blocked_receivers = 0;
             for receiver in &receivers {
                 match receiver.recv_from(&mut buffer) {
                     Ok((n_bytes, origin)) => {
@@ -204,13 +209,16 @@ fn scan_ssdp(
                         }
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        sleep(Duration::from_millis(103));
+                        blocked_receivers += 1;
                         continue;
                     }
                     Err(msg) => {
                         panic!("error while reading from UDP socket: {}", msg);
                     }
                 };
+            }
+            if blocked_receivers == receivers.len() {
+                sleep(Duration::from_millis(103));
             }
         }
     });
