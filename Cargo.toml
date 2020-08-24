@@ -9,4 +9,4 @@ edition = "2018"
 [dependencies]
 dns-parser = "0.8.0"
 httparse = "1.3.4"
-libc = "0.2.69"
+pnet = "0.26.0"
