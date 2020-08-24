@@ -1,114 +1,38 @@
-use std::{
-    io,
-    net::{
-        IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6,
-        UdpSocket,
-    },
-    sync,
-    thread::{sleep, spawn, JoinHandle},
-    time::Duration,
+use async_std::net::{
+    IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6,
+    UdpSocket,
 };
 
-///
-/// start an SSDP scanner thread
-///
-/// Setup a socket and send a question to the mDNS multicast address
-/// requesting a unicast reply. The replies are gathered in a separate
-/// thread and sent to a logging channel.
-pub fn scan(
-    local_ips: &[(std::net::IpAddr, u32)],
-    channel: sync::mpsc::Sender<String>,
-) -> std::io::Result<JoinHandle<()>> {
-    //
-    // Setup source/destination socket addresses
-    //
-    let ssdp_v4_socket_addr =
-        SocketAddrV4::new(Ipv4Addr::new(239, 255, 255, 250), 1900);
-    let ssdp_v6_socket_addr = SocketAddrV6::new(
-        Ipv6Addr::new(0xff0e, 0, 0, 0, 0, 0, 0, 0xc),
-        1900,
-        0,
-        0,
-    );
+use std::sync;
 
-    let local_socket_addrs = local_ips.iter().map(|(ip, scope)| match ip {
-        IpAddr::V4(addr) => SocketAddr::V4(SocketAddrV4::new(*addr, 0)),
-        IpAddr::V6(addr) => {
-            SocketAddr::V6(SocketAddrV6::new(*addr, 0, 0, *scope))
-        }
-    });
+const PROTOCOL: &str = "SSDP";
 
-    let senders: Vec<UdpSocket> = local_socket_addrs
-        .filter_map(|addr| match UdpSocket::bind(addr) {
-            Ok(socket) => Some(socket),
-            Err(msg) => {
-                eprintln!("skipped SSDP @ {} ({})", addr, msg);
-                None
-            }
-        })
-        .collect();
+macro_rules! log_err {
+    ($s:expr, $($e:expr),*) => {
+        eprintln!(concat!("[{}]: ", $s), PROTOCOL, $($e),*);
+    };
+}
 
-    let receivers: Vec<UdpSocket> = senders
-        .iter()
-        .map(|sender| {
-            let receiver: UdpSocket = sender.try_clone().unwrap();
-            receiver.set_nonblocking(true).unwrap();
-            receiver
-        })
-        .collect();
+macro_rules! log_fmt {
+    ($s:expr, $($e:expr),*) => {
+        format!(concat!("[{}]: ", $s), PROTOCOL, $($e),*);
+    };
+}
 
-    //
-    // start to listen for mDNS responses
-    //
-    let handle = spawn(move || {
-        let mut buffer = [0; 4096];
-        loop {
-            let mut blocked_receivers = 0;
-            for receiver in &receivers {
-                match receiver.recv_from(&mut buffer) {
-                    Ok((n_bytes, origin)) => {
-                        let ip = origin.ip();
-                        let data = &buffer[0..n_bytes];
-                        if let Some(name) = parse_response(data) {
-                            let log_msg = format!("{} {}", ip, name);
-                            if channel.send(log_msg).is_err() {
-                                println!("upstream error, abort scan");
-                                return;
-                            }
-                        }
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        blocked_receivers += 1;
-                        continue;
-                    }
-                    Err(msg) => {
-                        panic!("error while reading from UDP socket: {}", msg);
-                    }
-                };
-            }
-            if blocked_receivers == receivers.len() {
-                sleep(Duration::from_millis(103));
-            }
-        }
-    });
-
-    //
-    // send SSDP M-SEARCH
-    //
-
-    for sender in senders {
-        let ssdp_socket_addr = match sender.local_addr().unwrap().ip() {
-            IpAddr::V4(_) => SocketAddr::V4(ssdp_v4_socket_addr),
-            IpAddr::V6(_) => SocketAddr::V6(ssdp_v6_socket_addr),
-        };
-        let packet = build_packet(&ssdp_socket_addr);
-        if let Err(msg) = sender.send_to(&packet, &ssdp_socket_addr) {
-            eprintln!("Failed to send on {}: {}", ssdp_socket_addr, msg);
-        };
+// Get the SSDP socket address matching an IPv4/v6 address.
+fn multicast_socket_addr(ip_addr: IpAddr) -> SocketAddr {
+    match ip_addr {
+        IpAddr::V4(_) => SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::new(239, 255, 255, 250),
+            1900,
+        )),
+        IpAddr::V6(_) => SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0xff0e, 0, 0, 0, 0, 0, 0, 0xc),
+            1900,
+            0,
+            0,
+        )),
     }
-
-    // We're done!
-    Ok(handle)
 }
 
 fn build_packet(dst: &SocketAddr) -> Vec<u8> {
@@ -138,4 +62,53 @@ fn parse_response(data: &[u8]) -> Option<String> {
         }
     }
     return None;
+}
+
+pub async fn scan(
+    ip_addr: IpAddr,
+    scope: u32,
+    channel: sync::mpsc::Sender<String>,
+) {
+    let socket_addr = match ip_addr {
+        IpAddr::V4(ipv4) => SocketAddr::V4(SocketAddrV4::new(ipv4, 0)),
+        IpAddr::V6(ipv6) => {
+            SocketAddr::V6(SocketAddrV6::new(ipv6, 0, 0, scope))
+        }
+    };
+
+    let socket = match UdpSocket::bind(socket_addr).await {
+        Ok(socket) => socket,
+        Err(msg) => {
+            return log_err!("failed to bind {}: {}", socket_addr, msg);
+        }
+    };
+
+    let multicast_addr = multicast_socket_addr(ip_addr);
+    let packet = build_packet(&multicast_addr);
+    if let Err(msg) = socket.send_to(&packet, &multicast_addr).await {
+        return log_err!("failed to send to {}: {}", multicast_addr, msg);
+    }
+
+    let mut buf = [0_u8; 4096];
+    loop {
+        let (n_bytes, origin_addr) = match socket.recv_from(&mut buf).await {
+            Ok(rsp) => rsp,
+            Err(msg) => {
+                return log_err!(
+                    "failed to receive on {}: {}",
+                    socket_addr,
+                    msg
+                );
+            }
+        };
+
+        let src_ip = origin_addr.ip();
+        let data = &buf[0..n_bytes];
+        if let Some(name) = parse_response(data) {
+            let log_msg = log_fmt!("{} {}", src_ip, name.to_string());
+            if let Err(msg) = channel.send(log_msg) {
+                return log_err!("logging failed: {}", msg);
+            }
+        }
+    }
 }

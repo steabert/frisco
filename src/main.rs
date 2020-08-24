@@ -4,7 +4,6 @@ extern crate pnet;
 
 use std::collections;
 use std::sync;
-use std::thread::JoinHandle;
 
 mod mdns;
 mod ssdp;
@@ -13,29 +12,26 @@ mod ssdp;
 /// Loop over available interfaces and start a discovery scan
 /// on each of their addresses.
 ///
-fn main() {
-    let if_inet_addresses: Vec<(std::net::IpAddr, u32)> =
-        pnet::datalink::interfaces()
-            .iter()
-            .map(|iface| iface.ips.iter().map(move |ip| (ip.ip(), iface.index)))
-            .flatten()
-            .collect();
+#[async_std::main]
+async fn main() {
     let (sender, receiver) = sync::mpsc::channel::<String>();
 
-    let mut scanner_thread_handles = Vec::<JoinHandle<()>>::new();
+    let mut scan_handles = Vec::new();
+    for iface in pnet::datalink::interfaces() {
+        for ip_network in iface.ips {
+            scan_handles.push(async_std::task::spawn(mdns::scan(
+                ip_network.ip(),
+                iface.index,
+                sender.clone(),
+            )));
 
-    match mdns::scan(&if_inet_addresses, sender.clone()) {
-        Ok(handle) => {
-            scanner_thread_handles.push(handle);
+            scan_handles.push(async_std::task::spawn(ssdp::scan(
+                ip_network.ip(),
+                iface.index,
+                sender.clone(),
+            )));
         }
-        Err(msg) => eprintln!("mDNS scan failed to start: {}", msg),
-    };
-    match ssdp::scan(&if_inet_addresses, sender.clone()) {
-        Ok(handle) => {
-            scanner_thread_handles.push(handle);
-        }
-        Err(msg) => eprintln!("SSDP scan failed to start: {}", msg),
-    };
+    }
 
     println!("scanning...");
     let mut log_set = collections::HashSet::<String>::new();
@@ -47,8 +43,8 @@ fn main() {
         log_set.insert(log_msg);
     }
 
-    for handle in scanner_thread_handles {
-        handle.join().unwrap();
+    for handle in scan_handles {
+        handle.await;
     }
 
     return;

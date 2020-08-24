@@ -1,2 +1,3 @@
 # frisco
-mDNS/SSDP discovery
+
+Discover devices on the network via mDNS/SSDP multicast.
