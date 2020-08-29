@@ -3,10 +3,13 @@ extern crate httparse;
 extern crate pnet;
 
 use std::collections;
-use std::sync;
+use std::{net::IpAddr, sync};
 
 mod mdns;
+mod service;
 mod ssdp;
+
+use crate::service::Service;
 
 ///
 /// Loop over available interfaces and start a discovery scan
@@ -14,7 +17,7 @@ mod ssdp;
 ///
 #[async_std::main]
 async fn main() {
-    let (sender, receiver) = sync::mpsc::channel::<String>();
+    let (send_service, recv_service) = sync::mpsc::channel::<Service>();
 
     let mut scan_handles = Vec::new();
     for iface in pnet::datalink::interfaces() {
@@ -22,25 +25,26 @@ async fn main() {
             scan_handles.push(async_std::task::spawn(mdns::scan(
                 ip_network.ip(),
                 iface.index,
-                sender.clone(),
+                send_service.clone(),
             )));
 
             scan_handles.push(async_std::task::spawn(ssdp::scan(
                 ip_network.ip(),
                 iface.index,
-                sender.clone(),
+                send_service.clone(),
             )));
         }
     }
 
     println!("scanning...");
-    let mut log_set = collections::HashSet::<String>::new();
-    for log_msg in receiver.into_iter() {
-        if log_set.contains(&log_msg) {
+    let mut services = collections::HashMap::<String, Service>::new();
+    for service in recv_service.into_iter() {
+        let key = service.key();
+        if services.contains_key(&key) {
             continue;
         }
-        println!("{}", log_msg);
-        log_set.insert(log_msg);
+        println!("{}", service);
+        services.insert(key, service);
     }
 
     for handle in scan_handles {

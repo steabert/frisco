@@ -1,11 +1,29 @@
 use async_std::net::{
-    IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket,
+    IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6,
+    UdpSocket,
 };
 
+use crate::service::Service;
 use std::error::Error;
-use std::sync;
+use std::{fmt, sync};
 
 const PROTOCOL: &str = "SSDP";
+
+///
+/// SSDP information
+///
+/// Contains information returned by SSDP
+#[derive(Debug)]
+pub struct SSDPInfo {
+    location: String,
+    server: String,
+}
+
+impl fmt::Display for SSDPInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.server, self.location)
+    }
+}
 
 macro_rules! log_err {
     ($e:expr) => {
@@ -13,16 +31,13 @@ macro_rules! log_err {
     };
 }
 
-macro_rules! log_fmt {
-    ($ip:expr, $s:expr) => {
-        format!("{:16} {:8} {}", $ip, PROTOCOL, $s);
-    };
-}
-
 // Get the SSDP socket address matching an IPv4/v6 address.
 fn multicast_socket_addr(ip_addr: IpAddr) -> SocketAddr {
     match ip_addr {
-        IpAddr::V4(_) => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(239, 255, 255, 250), 1900)),
+        IpAddr::V4(_) => SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::new(239, 255, 255, 250),
+            1900,
+        )),
         IpAddr::V6(_) => SocketAddr::V6(SocketAddrV6::new(
             Ipv6Addr::new(0xff0e, 0, 0, 0, 0, 0, 0, 0xc),
             1900,
@@ -46,23 +61,37 @@ fn build_packet(dst: &SocketAddr) -> Vec<u8> {
     return m_search.as_bytes().to_vec();
 }
 
-fn parse_response(data: &[u8]) -> Option<String> {
+fn parse_response(data: &[u8]) -> Option<SSDPInfo> {
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut response = httparse::Response::new(&mut headers);
     if let Ok(_) = response.parse(data) {
+        let mut server = String::new();
+        let mut location = String::new();
         for header in response.headers {
             if header.name.to_ascii_lowercase() == "server" {
-                return Some(std::str::from_utf8(header.value).unwrap().to_string());
+                server = std::str::from_utf8(header.value).unwrap().to_string();
+            }
+
+            if header.name.to_ascii_lowercase() == "location" {
+                location =
+                    std::str::from_utf8(header.value).unwrap().to_string();
             }
         }
+        return Some(SSDPInfo { location, server });
     }
     return None;
 }
 
-pub async fn scan(ip_addr: IpAddr, scope: u32, channel: sync::mpsc::Sender<String>) {
+pub async fn scan(
+    ip_addr: IpAddr,
+    scope: u32,
+    channel: sync::mpsc::Sender<Service>,
+) {
     let socket_addr = match ip_addr {
         IpAddr::V4(ipv4) => SocketAddr::V4(SocketAddrV4::new(ipv4, 0)),
-        IpAddr::V6(ipv6) => SocketAddr::V6(SocketAddrV6::new(ipv6, 0, 0, scope)),
+        IpAddr::V6(ipv6) => {
+            SocketAddr::V6(SocketAddrV6::new(ipv6, 0, 0, scope))
+        }
     };
 
     let socket = match UdpSocket::bind(socket_addr).await {
@@ -89,9 +118,8 @@ pub async fn scan(ip_addr: IpAddr, scope: u32, channel: sync::mpsc::Sender<Strin
 
         let src_ip = origin_addr.ip();
         let data = &buf[0..n_bytes];
-        if let Some(name) = parse_response(data) {
-            let log_msg = log_fmt!(src_ip, name.to_string());
-            if let Err(err) = channel.send(log_msg) {
+        if let Some(info) = parse_response(data) {
+            if let Err(err) = channel.send(Service::ssdp(src_ip, info)) {
                 return log_err!(err);
             }
         }

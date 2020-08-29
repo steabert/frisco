@@ -1,11 +1,29 @@
+use std::error::Error;
+use std::{fmt, sync};
+
 use async_std::net::{
-    IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket,
+    IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6,
+    UdpSocket,
 };
 
-use std::error::Error;
-use std::sync;
+use crate::service::Service;
 
 const PROTOCOL: &str = "mDNS";
+
+///
+/// mDNS information
+///
+/// Contains information returned by mDNS
+#[derive(Debug)]
+pub struct MDNSInfo {
+    domain_name: String,
+}
+
+impl fmt::Display for MDNSInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.domain_name)
+    }
+}
 
 macro_rules! log_err {
     ($e:expr) => {
@@ -13,16 +31,13 @@ macro_rules! log_err {
     };
 }
 
-macro_rules! log_fmt {
-    ($ip:expr, $s:expr) => {
-        format!("{:16} {:8} {}", $ip, PROTOCOL, $s);
-    };
-}
-
 // Get the mDNS socket address matching an IPv4/v6 address.
 fn multicast_socket_addr(ip_addr: IpAddr) -> SocketAddr {
     match ip_addr {
-        IpAddr::V4(_) => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353)),
+        IpAddr::V4(_) => SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::new(224, 0, 0, 251),
+            5353,
+        )),
         IpAddr::V6(_) => SocketAddr::V6(SocketAddrV6::new(
             Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb),
             5353,
@@ -43,21 +58,31 @@ fn build_packet() -> Vec<u8> {
     return builder.build().unwrap();
 }
 
-fn parse_response(data: &[u8]) -> Option<String> {
+fn parse_response(data: &[u8]) -> Option<MDNSInfo> {
     if let Ok(packet) = dns_parser::Packet::parse(data) {
         for answer in packet.answers.first() {
-            if let dns_parser::rdata::RData::PTR(dns_parser::rdata::Ptr(name)) = answer.data {
-                return Some(name.to_string());
+            if let dns_parser::rdata::RData::PTR(dns_parser::rdata::Ptr(name)) =
+                &answer.data
+            {
+                return Some(MDNSInfo {
+                    domain_name: name.to_string(),
+                });
             }
         }
     };
     return None;
 }
 
-pub async fn scan(ip_addr: IpAddr, scope: u32, channel: sync::mpsc::Sender<String>) {
+pub async fn scan(
+    ip_addr: IpAddr,
+    scope: u32,
+    channel: sync::mpsc::Sender<Service>,
+) {
     let socket_addr = match ip_addr {
         IpAddr::V4(ipv4) => SocketAddr::V4(SocketAddrV4::new(ipv4, 0)),
-        IpAddr::V6(ipv6) => SocketAddr::V6(SocketAddrV6::new(ipv6, 0, 0, scope)),
+        IpAddr::V6(ipv6) => {
+            SocketAddr::V6(SocketAddrV6::new(ipv6, 0, 0, scope))
+        }
     };
 
     let socket = match UdpSocket::bind(socket_addr).await {
@@ -84,9 +109,8 @@ pub async fn scan(ip_addr: IpAddr, scope: u32, channel: sync::mpsc::Sender<Strin
 
         let src_ip = origin_addr.ip();
         let data = &buf[0..n_bytes];
-        if let Some(name) = parse_response(data) {
-            let log_msg = log_fmt!(src_ip, name.to_string());
-            if let Err(err) = channel.send(log_msg) {
+        if let Some(info) = parse_response(data) {
+            if let Err(err) = channel.send(Service::mdns(src_ip, info)) {
                 return log_err!(err);
             }
         }
