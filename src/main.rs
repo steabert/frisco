@@ -1,10 +1,10 @@
 extern crate dns_parser;
 extern crate httparse;
-extern crate pnet;
 
 use std::collections;
-use std::{net::IpAddr, sync};
+use std::sync;
 
+mod interfaces;
 mod mdns;
 mod service;
 mod ssdp;
@@ -20,20 +20,18 @@ async fn main() {
     let (send_service, recv_service) = sync::mpsc::channel::<Service>();
 
     let mut scan_handles = Vec::new();
-    for iface in pnet::datalink::interfaces() {
-        for ip_network in iface.ips {
-            scan_handles.push(async_std::task::spawn(mdns::scan(
-                ip_network.ip(),
-                iface.index,
-                send_service.clone(),
-            )));
+    for (addr, scope) in interfaces::ifaddrs() {
+        scan_handles.push(async_std::task::spawn(mdns::scan(
+            addr,
+            scope,
+            send_service.clone(),
+        )));
 
-            scan_handles.push(async_std::task::spawn(ssdp::scan(
-                ip_network.ip(),
-                iface.index,
-                send_service.clone(),
-            )));
-        }
+        scan_handles.push(async_std::task::spawn(ssdp::scan(
+            addr,
+            scope,
+            send_service.clone(),
+        )));
     }
 
     println!("scanning...");

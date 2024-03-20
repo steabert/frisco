@@ -84,13 +84,13 @@ fn parse_response(data: &[u8]) -> Option<SSDPInfo> {
 
 pub async fn scan(
     ip_addr: IpAddr,
-    scope: u32,
+    scope: Option<u32>,
     channel: sync::mpsc::Sender<Service>,
 ) {
     let socket_addr = match ip_addr {
         IpAddr::V4(ipv4) => SocketAddr::V4(SocketAddrV4::new(ipv4, 0)),
         IpAddr::V6(ipv6) => {
-            SocketAddr::V6(SocketAddrV6::new(ipv6, 0, 0, scope))
+            SocketAddr::V6(SocketAddrV6::new(ipv6, 0, 0, scope.unwrap()))
         }
     };
 
