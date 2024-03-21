@@ -2,14 +2,16 @@ extern crate dns_parser;
 extern crate httparse;
 
 use std::collections;
-use std::sync;
+
+use crate::service::Service;
+use async_std::channel;
+use async_std::task::spawn;
+use futures::future::join_all;
 
 mod interfaces;
 mod mdns;
 mod service;
 mod ssdp;
-
-use crate::service::Service;
 
 ///
 /// Loop over available interfaces and start a discovery scan
@@ -17,37 +19,29 @@ use crate::service::Service;
 ///
 #[async_std::main]
 async fn main() {
-    let (send_service, recv_service) = sync::mpsc::channel::<Service>();
+    let (s, r) = channel::unbounded::<Service>();
 
-    let mut scan_handles = Vec::new();
+    let mut tasks = Vec::new();
     for (addr, scope) in interfaces::ifaddrs() {
-        scan_handles.push(async_std::task::spawn(mdns::scan(
-            addr,
-            scope,
-            send_service.clone(),
-        )));
-
-        scan_handles.push(async_std::task::spawn(ssdp::scan(
-            addr,
-            scope,
-            send_service.clone(),
-        )));
+        tasks.push(spawn(mdns::scan(addr, scope, s.clone())));
+        tasks.push(spawn(ssdp::scan(addr, scope, s.clone())));
     }
+    tasks.push(spawn(log(r.clone())));
 
-    println!("scanning...");
-    let mut services = collections::HashMap::<String, Service>::new();
-    for service in recv_service.into_iter() {
-        let key = service.key();
-        if services.contains_key(&key) {
-            continue;
-        }
-        println!("{}", service);
-        services.insert(key, service);
-    }
-
-    for handle in scan_handles {
-        handle.await;
-    }
+    join_all(tasks).await;
 
     return;
+}
+
+async fn log(r: channel::Receiver<Service>) {
+    println!("scanning...");
+    let mut messages = collections::HashMap::<String, Service>::new();
+    while let Ok(msg) = r.recv().await {
+        let key = msg.key();
+        if messages.contains_key(&key) {
+            continue;
+        }
+        println!("{}", msg);
+        messages.insert(key, msg);
+    }
 }

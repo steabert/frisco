@@ -1,3 +1,4 @@
+use async_std::channel::Sender;
 use async_std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6,
     UdpSocket,
@@ -5,7 +6,7 @@ use async_std::net::{
 
 use crate::service::Service;
 use std::error::Error;
-use std::{fmt, sync};
+use std::fmt;
 
 const PROTOCOL: &str = "SSDP";
 
@@ -85,7 +86,7 @@ fn parse_response(data: &[u8]) -> Option<SSDPInfo> {
 pub async fn scan(
     ip_addr: IpAddr,
     scope: Option<u32>,
-    channel: sync::mpsc::Sender<Service>,
+    channel: Sender<Service>,
 ) {
     let socket_addr = match ip_addr {
         IpAddr::V4(ipv4) => SocketAddr::V4(SocketAddrV4::new(ipv4, 0)),
@@ -119,7 +120,7 @@ pub async fn scan(
         let src_ip = origin_addr.ip();
         let data = &buf[0..n_bytes];
         if let Some(info) = parse_response(data) {
-            if let Err(err) = channel.send(Service::ssdp(src_ip, info)) {
+            if let Err(err) = channel.send(Service::ssdp(src_ip, info)).await {
                 return log_err!(err);
             }
         }
