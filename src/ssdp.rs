@@ -27,7 +27,7 @@ impl fmt::Display for SSDPInfo {
 
 macro_rules! log_err {
     ($e:expr) => {
-        eprintln!("[error]: {}: {}: {}", PROTOCOL, $e, $e.source().unwrap());
+        eprintln!("[error]: {}: {}: {}", PROTOCOL, $e, $e.source().unwrap())
     };
 }
 

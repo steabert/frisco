@@ -27,7 +27,7 @@ impl fmt::Display for MDNSInfo {
 
 macro_rules! log_err {
     ($e:expr) => {
-        eprintln!("[error]: {}: {}: {}", PROTOCOL, $e, $e.source().unwrap());
+        eprintln!("[error]: {}: {}: {}", PROTOCOL, $e, $e.source().unwrap())
     };
 }
 
@@ -60,7 +60,7 @@ fn build_packet() -> Vec<u8> {
 
 fn parse_response(data: &[u8]) -> Option<MDNSInfo> {
     if let Ok(packet) = dns_parser::Packet::parse(data) {
-        for answer in packet.answers.first() {
+        if let Some(answer) = packet.answers.first() {
             if let dns_parser::rdata::RData::PTR(dns_parser::rdata::Ptr(name)) =
                 &answer.data
             {

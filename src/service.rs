@@ -16,10 +16,6 @@ pub struct Service {
 }
 
 impl Service {
-    pub fn new(ip: IpAddr, info: ServiceInfo) -> Service {
-        Service { ip, info }
-    }
-
     pub fn mdns(ip: IpAddr, info: MDNSInfo) -> Service {
         Service {
             ip,

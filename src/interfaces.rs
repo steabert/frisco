@@ -19,7 +19,7 @@ pub struct Interfaces {
 impl Interfaces {
     fn new() -> Interfaces {
         unsafe {
-            let mut ptr_ifa_head: *mut libc::ifaddrs = mem::MaybeUninit::uninit().assume_init();
+            let mut ptr_ifa_head: *mut libc::ifaddrs = mem::zeroed();
             if libc::getifaddrs(&mut ptr_ifa_head) != 0 {
                 panic!("failed to get interface addresses");
             }
@@ -59,13 +59,19 @@ impl Iterator for Interfaces {
                             // because the representation in memory is already network
                             // byte order.
                             let bytes: [u8; 4] = mem::transmute(s_addr);
-                            return Some((IpAddr::V4(Ipv4Addr::from(bytes)), None));
+                            return Some((
+                                IpAddr::V4(Ipv4Addr::from(bytes)),
+                                None,
+                            ));
                         }
                         libc::AF_INET6 => {
                             let sockaddr = ptr_sa as *const libc::sockaddr_in6;
                             let scope_id = (*sockaddr).sin6_scope_id;
                             let s_addr = (*sockaddr).sin6_addr.s6_addr;
-                            return Some((IpAddr::V6(Ipv6Addr::from(s_addr)), Some(scope_id)));
+                            return Some((
+                                IpAddr::V6(Ipv6Addr::from(s_addr)),
+                                Some(scope_id),
+                            ));
                         }
                         _ => (),
                     };
