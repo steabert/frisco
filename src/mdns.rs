@@ -10,6 +10,12 @@ use crate::service::Service;
 
 const PROTOCOL: &str = "mDNS";
 
+const MDNS_SERVICES: [&'static str; 3] = [
+    "_googlecast._tcp.local",
+    "_axis-video.tcp.local",
+    "_http._tcp.local",
+];
+
 ///
 /// mDNS information
 ///
@@ -47,10 +53,10 @@ fn multicast_socket_addr(ip_addr: IpAddr) -> SocketAddr {
     }
 }
 
-fn build_packet() -> Vec<u8> {
+fn build_packet(qname: &str) -> Vec<u8> {
     let mut builder = dns_parser::Builder::new_query(0, false);
     builder.add_question(
-        "_googlecast._tcp.local",
+        qname,
         true, // prefer unicast response
         dns_parser::QueryType::PTR,
         dns_parser::QueryClass::IN,
@@ -93,10 +99,13 @@ pub async fn scan(
     };
 
     let multicast_addr = multicast_socket_addr(ip_addr);
-    let packet = build_packet();
-    if let Err(err) = socket.send_to(&packet, &multicast_addr).await {
-        return log_err!(err);
-    };
+
+    for qname in MDNS_SERVICES {
+        let packet = build_packet(qname);
+        if let Err(err) = socket.send_to(&packet, &multicast_addr).await {
+            return log_err!(err);
+        };
+    }
 
     let mut buf = [0_u8; 4096];
     loop {
