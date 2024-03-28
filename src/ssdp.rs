@@ -1,11 +1,10 @@
-use async_std::channel::Sender;
-use async_std::net::{
+use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6,
-    UdpSocket,
 };
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 
 use crate::service::Service;
-use std::error::Error;
 use std::fmt;
 
 const PROTOCOL: &str = "SSDP";
@@ -28,7 +27,7 @@ impl fmt::Display for SSDPInfo {
 
 macro_rules! log_err {
     ($e:expr) => {
-        eprintln!("[error]: {}: {}: {}", PROTOCOL, $e, $e.source().unwrap())
+        eprintln!("[error]: {}: {}: {}", PROTOCOL, $e, $e.to_string())
     };
 }
 
@@ -86,7 +85,7 @@ fn parse_response(data: &[u8]) -> Option<SSDPInfo> {
 pub async fn scan(
     ip_addr: IpAddr,
     scope: Option<u32>,
-    channel: Sender<Service>,
+    channel: mpsc::Sender<Service>,
 ) {
     let socket_addr = match ip_addr {
         IpAddr::V4(ipv4) => SocketAddr::V4(SocketAddrV4::new(ipv4, 0)),
