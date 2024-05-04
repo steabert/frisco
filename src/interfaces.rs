@@ -29,6 +29,14 @@ impl Interfaces {
             }
         }
     }
+    fn shift(&mut self) -> Option<libc::ifaddrs> {
+        if self.ptr_ifa.is_null() {
+            return None;
+        }
+        let ifa = unsafe { *self.ptr_ifa };
+        self.ptr_ifa = ifa.ifa_next;
+        return Some(ifa);
+    }
 }
 
 impl Drop for Interfaces {
@@ -42,43 +50,56 @@ impl Drop for Interfaces {
 impl Iterator for Interfaces {
     type Item = InetAddr;
     fn next(&mut self) -> Option<InetAddr> {
-        while !self.ptr_ifa.is_null() {
-            unsafe {
-                let ifa = *self.ptr_ifa;
-                self.ptr_ifa = ifa.ifa_next;
+        let next_sockaddr = loop {
+            let ifa = self.shift()?;
 
-                let ptr_sa = ifa.ifa_addr;
-
-                if !ptr_sa.is_null() {
-                    let sa_family = (*ptr_sa).sa_family;
-                    match sa_family as i32 {
-                        libc::AF_INET => {
-                            let sockaddr = ptr_sa as *const libc::sockaddr_in;
-                            let s_addr = (*sockaddr).sin_addr.s_addr;
-                            // Note that s_addr shouldn't be used as if it was "u32"
-                            // because the representation in memory is already network
-                            // byte order.
-                            let bytes: [u8; 4] = mem::transmute(s_addr);
-                            return Some((
-                                IpAddr::V4(Ipv4Addr::from(bytes)),
-                                None,
-                            ));
-                        }
-                        libc::AF_INET6 => {
-                            let sockaddr = ptr_sa as *const libc::sockaddr_in6;
-                            let scope_id = (*sockaddr).sin6_scope_id;
-                            let s_addr = (*sockaddr).sin6_addr.s6_addr;
-                            return Some((
-                                IpAddr::V6(Ipv6Addr::from(s_addr)),
-                                Some(scope_id),
-                            ));
-                        }
-                        _ => (),
-                    };
-                }
+            let ptr_sa = ifa.ifa_addr;
+            if let Some(sockaddr) = sock_addr(ptr_sa) {
+                break sockaddr;
             }
-        }
+        };
+
+        return Some(inet_addr(next_sockaddr));
+    }
+}
+
+enum SockAddr {
+    V4(libc::sockaddr_in),
+    V6(libc::sockaddr_in6),
+}
+
+fn sock_addr(c_sockaddr: *const libc::sockaddr) -> Option<SockAddr> {
+    if c_sockaddr.is_null() {
         return None;
+    }
+
+    let sa_family = unsafe { (*c_sockaddr).sa_family };
+    match sa_family as i32 {
+        libc::AF_INET => Some(SockAddr::V4(unsafe {
+            *(c_sockaddr as *const libc::sockaddr_in)
+        })),
+        libc::AF_INET6 => Some(SockAddr::V6(unsafe {
+            *(c_sockaddr as *const libc::sockaddr_in6)
+        })),
+        _ => None,
+    }
+}
+
+fn inet_addr(addr: SockAddr) -> InetAddr {
+    match addr {
+        SockAddr::V4(sockaddr) => {
+            let s_addr = sockaddr.sin_addr.s_addr;
+            // Note that s_addr shouldn't be used as if it was "u32"
+            // because the representation in memory is already network
+            // byte order.
+            let bytes: [u8; 4] = unsafe { mem::transmute(s_addr) };
+            return (IpAddr::V4(Ipv4Addr::from(bytes)), None);
+        }
+        SockAddr::V6(sockaddr) => {
+            let s_addr = sockaddr.sin6_addr.s6_addr;
+            let scope_id = sockaddr.sin6_scope_id;
+            return (IpAddr::V6(Ipv6Addr::from(s_addr)), Some(scope_id));
+        }
     }
 }
 
